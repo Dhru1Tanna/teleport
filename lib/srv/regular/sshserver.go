@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -190,6 +191,13 @@ type Server struct {
 
 	// nodeWatcher is the server's node watcher.
 	nodeWatcher *services.NodeWatcher
+
+	// createHostUser configures whether a host should allow host user
+	// creation
+	createHostUser   bool
+	startCleanupOnce *sync.Once
+	// users is used to start the automatic user deletion loop
+	users srv.HostUsers
 }
 
 // GetClock returns server clock implementation
@@ -248,6 +256,18 @@ func (s *Server) GetLockWatcher() *services.LockWatcher {
 	return s.lockWatcher
 }
 
+// GetCreateHostUser determines whether users should be created on the
+// host automatically
+func (s *Server) GetCreateHostUser() bool {
+	return s.createHostUser
+}
+
+// GetHostUsers returns the HostUsers instance being used to manage
+// host user provisioning
+func (s *Server) GetHostUsers() srv.HostUsers {
+	return s.users
+}
+
 // isAuditedAtProxy returns true if sessions are being recorded at the proxy
 // and this is a Teleport node.
 func (s *Server) isAuditedAtProxy() bool {
@@ -281,6 +301,11 @@ func (s *Server) close() {
 	if s.dynamicLabels != nil {
 		s.dynamicLabels.Close()
 	}
+
+	if s.users != nil {
+		s.users.Shutdown()
+		s.users = nil
+	}
 }
 
 // Close closes listening socket and stops accepting connections
@@ -297,12 +322,41 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return err
 }
 
+func (s *Server) acquireSemaphoreStartUserCleanup() {
+	s.startCleanupOnce.Do(func() {
+		semLock, err := services.AcquireSemaphoreWithRetry(s.ctx,
+			services.AcquireSemaphoreWithRetryConfig{
+				Request: types.AcquireSemaphoreRequest{
+					SemaphoreKind: types.SemaphoreKindHostUserCleanup,
+					SemaphoreName: s.uuid,
+					MaxLeases:     1,
+					Expires:       time.Now().Add(time.Minute * 10),
+					Holder:        s.uuid,
+				},
+				Retry: utils.LinearConfig{
+					Step: time.Minute * 1,
+					Max:  time.Minute * 8,
+				},
+			})
+		if err != nil {
+			log.Errorf("Failed to acquire semaphore, disabling auto user creation: %s", err)
+			s.users = nil
+		} else {
+			go s.users.UserCleanup(s.reg, s.authService, *semLock)
+		}
+	})
+}
+
 // Start starts server
 func (s *Server) Start() error {
 	// If the server has dynamic labels defined, start a loop that will
 	// asynchronously keep them updated.
 	if s.dynamicLabels != nil {
 		go s.dynamicLabels.Start()
+	}
+
+	if s.users != nil {
+		s.acquireSemaphoreStartUserCleanup()
 	}
 
 	// If the server requested connections to it arrive over a reverse tunnel,
@@ -314,6 +368,7 @@ func (s *Server) Start() error {
 	if err := s.srv.Start(); err != nil {
 		return trace.Wrap(err)
 	}
+
 	// Heartbeat should start only after s.srv.Start.
 	// If the server is configured to listen on port 0 (such as in tests),
 	// it'll only populate its actual listening address during s.srv.Start.
@@ -330,6 +385,11 @@ func (s *Server) Serve(l net.Listener) error {
 	// asynchronously keep them updated.
 	if s.dynamicLabels != nil {
 		go s.dynamicLabels.Start()
+	}
+	// if the server allows host user provisioning, this will start an
+	// automatic cleanup process for any temporary leftover users
+	if s.users != nil {
+		s.acquireSemaphoreStartUserCleanup()
 	}
 
 	go s.heartbeat.Run()
@@ -539,6 +599,14 @@ func SetOnHeartbeat(fn func(error)) ServerOption {
 	}
 }
 
+// SetCreateHostUser configures host user creation on a server
+func SetCreateHostUser(createUser bool) ServerOption {
+	return func(s *Server) error {
+		s.createHostUser = createUser
+		return nil
+	}
+}
+
 // SetAllowTCPForwarding sets the TCP port forwarding mode that this server is
 // allowed to offer. The default value is SSHPortForwardingModeAll, i.e. port
 // forwarding is allowed.
@@ -650,6 +718,15 @@ func New(addr utils.NetAddr,
 		trace.ComponentFields: logrus.Fields{},
 	})
 
+	if s.createHostUser {
+		users, err := srv.NewHostUsers(ctx)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		s.users = users
+		s.startCleanupOnce = &sync.Once{}
+	}
+
 	s.reg, err = srv.NewSessionRegistry(srv.SessionRegistryConfig{
 		Srv:                   s,
 		SessionTrackerService: auth,
@@ -718,7 +795,9 @@ func New(addr utils.NetAddr,
 		s.srv.Close()
 		return nil, trace.Wrap(err)
 	}
+
 	s.heartbeat = heartbeat
+
 	return s, nil
 }
 
