@@ -1236,6 +1236,7 @@ func (s *APIServer) createOIDCAuthRequest(auth ClientI, w http.ResponseWriter, r
 	if err := httplib.ReadJSON(r, &req); err != nil {
 		return nil, trace.Wrap(err)
 	}
+
 	response, err := auth.CreateOIDCAuthRequest(req.Req)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -1272,6 +1273,7 @@ func (s *APIServer) validateOIDCAuthCallback(auth ClientI, w http.ResponseWriter
 	if err := httplib.ReadJSON(r, &req); err != nil {
 		return nil, trace.Wrap(err)
 	}
+
 	response, err := auth.ValidateOIDCAuthCallback(req.Query)
 	if err != nil {
 		return nil, trace.Wrap(err)
