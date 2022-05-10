@@ -136,11 +136,14 @@ func (h *AuthHandlers) CreateIdentityContext(sconn *ssh.ServerConn) (IdentityCon
 	}
 	identity.CertAuthority = certAuthority
 
-	roleSet, origRoles, err := h.fetchRoleSet(certificate, certAuthority, identity.TeleportUser, clusterName.GetClusterName())
+	accessInfo, err := h.fetchAccessInfo(certificate, certAuthority, identity.TeleportUser, clusterName.GetClusterName())
 	if err != nil {
 		return IdentityContext{}, trace.Wrap(err)
 	}
-	identity.RoleSet, identity.UnmappedRoles = roleSet, origRoles
+	identity.UnmappedRoles = accessInfo.UnmappedRoles
+	identity.AllowedResourceIDs = accessInfo.AllowedResourceIDs
+	identity.AccessChecker = services.NewAccessChecker(accessInfo, clusterName.GetClusterName())
+
 	identity.Impersonator = certificate.Extensions[teleport.CertExtensionImpersonator]
 	accessRequestIDs, err := parseAccessRequestIDs(certificate.Extensions[teleport.CertExtensionTeleportActiveRequests])
 	if err != nil {
@@ -160,19 +163,12 @@ func (h *AuthHandlers) CreateIdentityContext(sconn *ssh.ServerConn) (IdentityCon
 		}
 		identity.Generation = generation
 	}
-	if allowedResourcesStr, ok := certificate.Extensions[teleport.CertExtensionAllowedResources]; ok {
-		allowedResourceIDs, err := services.ResourceIDsFromString(allowedResourcesStr)
-		if err != nil {
-			return IdentityContext{}, trace.Wrap(err)
-		}
-		identity.AllowedResourceIDs = allowedResourceIDs
-	}
 	return identity, nil
 }
 
 // CheckAgentForward checks if agent forwarding is allowed for the users RoleSet.
 func (h *AuthHandlers) CheckAgentForward(ctx *ServerContext) error {
-	if err := ctx.Identity.RoleSet.CheckAgentForward(ctx.Identity.Login); err != nil {
+	if err := ctx.Identity.AccessChecker.CheckAgentForward(ctx.Identity.Login); err != nil {
 		return trace.Wrap(err)
 	}
 
@@ -181,7 +177,7 @@ func (h *AuthHandlers) CheckAgentForward(ctx *ServerContext) error {
 
 // CheckX11Forward checks if X11 forwarding is permitted for the user's RoleSet.
 func (h *AuthHandlers) CheckX11Forward(ctx *ServerContext) error {
-	if !ctx.Identity.RoleSet.PermitX11Forwarding() {
+	if !ctx.Identity.AccessChecker.PermitX11Forwarding() {
 		return trace.AccessDenied("x11 forwarding not permitted")
 	}
 	return nil
@@ -189,8 +185,8 @@ func (h *AuthHandlers) CheckX11Forward(ctx *ServerContext) error {
 
 // CheckPortForward checks if port forwarding is allowed for the users RoleSet.
 func (h *AuthHandlers) CheckPortForward(addr string, ctx *ServerContext) error {
-	if ok := ctx.Identity.RoleSet.CanPortForward(); !ok {
-		systemErrorMessage := fmt.Sprintf("port forwarding not allowed by role set: %v", ctx.Identity.RoleSet)
+	if ok := ctx.Identity.AccessChecker.CanPortForward(); !ok {
+		systemErrorMessage := fmt.Sprintf("port forwarding not allowed by role set: %v", ctx.Identity.AccessChecker.RoleNames())
 		userErrorMessage := "port forwarding not allowed"
 
 		// Emit port forward failure event
@@ -436,13 +432,13 @@ func (h *AuthHandlers) canLoginWithRBAC(cert *ssh.Certificate, clusterName strin
 	}
 
 	// get roles assigned to this user
-	roles, _, err := h.fetchRoleSet(cert, ca, teleportUser, clusterName)
+	accessInfo, err := h.fetchAccessInfo(cert, ca, teleportUser, clusterName)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
 	// we don't need to check the RBAC for the node if they are only allowed to join sessions
-	if osUser == teleport.SSHSessionJoinPrincipal && auth.HasV5Role(roles) {
+	if osUser == teleport.SSHSessionJoinPrincipal && auth.HasV5Role(accessInfo.RoleSet) {
 		return nil
 	}
 
@@ -457,7 +453,8 @@ func (h *AuthHandlers) canLoginWithRBAC(cert *ssh.Certificate, clusterName strin
 	}
 
 	// check if roles allow access to server
-	if err := roles.CheckAccess(
+	accessChecker := services.NewAccessChecker(accessInfo, clusterName)
+	if err := accessChecker.CheckAccess(
 		h.c.Server.GetInfo(),
 		mfaParams,
 		services.NewLoginMatcher(osUser),
@@ -469,6 +466,21 @@ func (h *AuthHandlers) canLoginWithRBAC(cert *ssh.Certificate, clusterName strin
 	return nil
 }
 
+// fetchAccessInfo fetches the services.AccessChecker (after role mapping)
+// together with the original roles (prior to role mapping) assigned to a
+// Teleport user.
+func (h *AuthHandlers) fetchAccessInfo(cert *ssh.Certificate, ca types.CertAuthority, teleportUser string, clusterName string) (*services.AccessInfo, error) {
+	var accessInfo *services.AccessInfo
+	var err error
+	if clusterName == ca.GetClusterName() {
+		accessInfo, err = services.LocalAccessInfoFromCertificate(cert, h.c.AccessPoint)
+	} else {
+		accessInfo, err = services.RemoteAccessInfoFromCertificate(cert, h.c.AccessPoint, ca.CombinedMapping())
+	}
+	return accessInfo, trace.Wrap(err)
+}
+
+// TODO: delete
 // fetchRoleSet fetches the services.RoleSet (after role mapping) together with
 // the original roles (prior to role mapping) assigned to a Teleport user.
 func (h *AuthHandlers) fetchRoleSet(cert *ssh.Certificate, ca types.CertAuthority, teleportUser string, clusterName string) (mapped services.RoleSet, unmapped []string, err error) {

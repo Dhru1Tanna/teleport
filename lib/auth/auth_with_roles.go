@@ -119,7 +119,7 @@ func (a *ServerWithRoles) action(namespace, resource string, verbs ...string) er
 // even if they are not admins, e.g. update their own passwords,
 // or generate certificates, otherwise it will require admin privileges
 func (a *ServerWithRoles) currentUserAction(username string) error {
-	if hasLocalUserRole(a.context.Checker) && username == a.context.User.GetName() {
+	if hasLocalUserRole(a.context) && username == a.context.User.GetName() {
 		return nil
 	}
 	return a.context.Checker.CheckAccessToRule(&services.Context{User: a.context.User},
@@ -198,16 +198,16 @@ func (a *ServerWithRoles) actionForKindSSHSession(namespace, verb string, sid se
 // hasBuiltinRole checks the type of the role set returned and the name.
 // Returns true if role set is builtin and the name matches.
 func (a *ServerWithRoles) hasBuiltinRole(name string) bool {
-	return HasBuiltinRole(a.context.Checker, name)
+	return HasBuiltinRole(a.context, name)
 }
 
 // HasBuiltinRole checks the type of the role set returned and the name.
 // Returns true if role set is builtin and the name matches.
-func HasBuiltinRole(checker services.AccessChecker, name string) bool {
-	if _, ok := checker.(BuiltinRoleSet); !ok {
+func HasBuiltinRole(authContext Context, name string) bool {
+	if _, ok := authContext.UnmappedIdentity.(BuiltinRole); !ok {
 		return false
 	}
-	if !checker.HasRole(name) {
+	if !authContext.Checker.HasRole(name) {
 		return false
 	}
 
@@ -217,7 +217,7 @@ func HasBuiltinRole(checker services.AccessChecker, name string) bool {
 // hasRemoteBuiltinRole checks the type of the role set returned and the name.
 // Returns true if role set is remote builtin and the name matches.
 func (a *ServerWithRoles) hasRemoteBuiltinRole(name string) bool {
-	if _, ok := a.context.Checker.(RemoteBuiltinRoleSet); !ok {
+	if _, ok := a.context.UnmappedIdentity.(RemoteBuiltinRole); !ok {
 		return false
 	}
 	if !a.context.Checker.HasRole(name) {
@@ -226,16 +226,15 @@ func (a *ServerWithRoles) hasRemoteBuiltinRole(name string) bool {
 	return true
 }
 
-// hasRemoteUserRole checks if the type of the role set is a remote user or
-// not.
-func hasRemoteUserRole(checker services.AccessChecker) bool {
-	_, ok := checker.(RemoteUserRoleSet)
+// hasRemoteUserRole checks if the auth context is for a remote user or not.
+func hasRemoteUserRole(authContext Context) bool {
+	_, ok := authContext.UnmappedIdentity.(RemoteUser)
 	return ok
 }
 
 // hasLocalUserRole checks if the type of the role set is a local user or not.
-func hasLocalUserRole(checker services.AccessChecker) bool {
-	_, ok := checker.(LocalUserRoleSet)
+func hasLocalUserRole(authContext Context) bool {
+	_, ok := authContext.UnmappedIdentity.(LocalUser)
 	return ok
 }
 
@@ -804,21 +803,15 @@ func (a *ServerWithRoles) checkAccessToNode(server types.Server) error {
 		return nil
 	}
 
-	roleset, err := services.FetchRoles(a.context.User.GetRoles(), a.authServer, a.context.User.GetTraits())
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
 	// MFA is not required to list the nodes, but will be required to connect
 	// to them.
 	mfaParams := services.AccessMFAParams{Verified: true}
 
-	for _, role := range roleset {
-		for _, login := range role.GetLogins(types.Allow) {
-			err := roleset.CheckAccess(server, mfaParams, services.NewLoginMatcher(login))
-			if err == nil {
-				return nil
-			}
+	logins := a.context.Checker.GetLogins()
+	for _, login := range logins {
+		err := a.context.Checker.CheckAccess(server, mfaParams, services.NewLoginMatcher(login))
+		if err == nil {
+			return nil
 		}
 	}
 
@@ -896,9 +889,13 @@ func (a *ServerWithRoles) GetNodes(ctx context.Context, namespace string, opts .
 // ListResources returns a paginated list of resources filtered by user access.
 func (a *ServerWithRoles) ListResources(ctx context.Context, req proto.ListResourcesRequest) (*types.ListResourcesResponse, error) {
 	if req.UseSearchAsRoles {
+		clusterName, err := a.authServer.GetDomainName()
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
 		// For search-based access requests, replace the current roles with all
 		// roles the user is allowed to search with.
-		if err := a.context.UseSearchAsRoles(services.RoleGetter(a.authServer)); err != nil {
+		if err := a.context.UseSearchAsRoles(services.RoleGetter(a.authServer), clusterName); err != nil {
 			return nil, trace.Wrap(err)
 		}
 		a.authServer.emitter.EmitAuditEvent(a.authServer.closeCtx, &apievents.AccessRequestResourceSearch{
@@ -1946,7 +1943,7 @@ func (a *ServerWithRoles) generateUserCerts(ctx context.Context, req proto.UserC
 		return nil, trace.Wrap(err)
 	}
 
-	var requestedResourceIDs []types.ResourceID
+	allowedResourceIDs := a.context.Checker.GetAllowedResourceIDs()
 	if len(req.AccessRequests) > 0 {
 		// add any applicable access request values.
 		req.AccessRequests = apiutils.Deduplicate(req.AccessRequests)
@@ -1961,10 +1958,10 @@ func (a *ServerWithRoles) generateUserCerts(ctx context.Context, req proto.UserC
 			}
 			roles = append(roles, accessRequest.GetRoles()...)
 
-			if len(accessRequest.GetRequestedResourceIDs()) > 0 && len(requestedResourceIDs) > 0 {
+			if len(allowedResourceIDs) > 0 && len(accessRequest.GetRequestedResourceIDs()) > 0 {
 				return nil, trace.BadParameter("cannot generate certificate with multiple search-based access requests")
 			}
-			requestedResourceIDs = accessRequest.GetRequestedResourceIDs()
+			allowedResourceIDs = accessRequest.GetRequestedResourceIDs()
 		}
 		// nothing prevents an access-request from including roles already possessed by the
 		// user, so we must make sure to trim duplicate roles.
@@ -1976,7 +1973,17 @@ func (a *ServerWithRoles) generateUserCerts(ctx context.Context, req proto.UserC
 		return nil, trace.Wrap(err)
 	}
 	// add implicit roles to the set and build a checker
-	checker := services.NewRoleSet(parsedRoles...)
+	roleSet := services.NewRoleSet(parsedRoles...)
+	clusterName, err := a.GetDomainName()
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	checker := services.NewAccessChecker(&services.AccessInfo{
+		Roles:              roleSet.RoleNames(),
+		Traits:             traits,
+		AllowedResourceIDs: allowedResourceIDs,
+		RoleSet:            roleSet,
+	}, clusterName)
 
 	switch {
 	case a.hasBuiltinRole(string(types.RoleAdmin)):
@@ -2066,7 +2073,6 @@ func (a *ServerWithRoles) generateUserCerts(ctx context.Context, req proto.UserC
 		activeRequests: services.RequestIDs{
 			AccessRequests: req.AccessRequests,
 		},
-		requestedResourceIDs: requestedResourceIDs,
 	}
 	if user.GetName() != a.context.User.GetName() {
 		certReq.impersonator = a.context.User.GetName()
@@ -3318,11 +3324,8 @@ func (a *ServerWithRoles) canImpersonateBuiltinRole(role types.SystemRole) error
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	roleSet, ok := roleCtx.Checker.(BuiltinRoleSet)
-	if !ok {
-		return trace.BadParameter("expected BuiltinRoleSet, got %T", roleCtx.Checker)
-	}
-	err = a.context.Checker.CheckImpersonate(a.context.User, roleCtx.User, roleSet.RoleSet.WithoutImplicit())
+	roleSet := services.RoleSet(roleCtx.Checker.Roles())
+	err = a.context.Checker.CheckImpersonate(a.context.User, roleCtx.User, roleSet.WithoutImplicit())
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -3596,7 +3599,7 @@ func (a *ServerWithRoles) UpsertKubeService(ctx context.Context, s types.Server)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	_, isService := a.context.Checker.(BuiltinRoleSet)
+	_, isService := a.context.Identity.(BuiltinRole)
 	isMFAVerified := a.context.Identity.GetIdentity().MFAVerified != ""
 	mfaParams := services.AccessMFAParams{
 		// MFA requirement only applies to users.
@@ -3658,12 +3661,12 @@ func (a *ServerWithRoles) filterKubeServices(server types.Server) error {
 
 	// Filter out agents that don't have support for moderated sessions access
 	// checking if the user has any roles that require it.
-	if hasLocalUserRole(a.context.Checker) {
-		roles := a.context.Checker.(LocalUserRoleSet)
+	if hasLocalUserRole(a.context) {
+		roles := a.context.Checker.Roles()
 		agentVersion, versionErr := semver.NewVersion(server.GetTeleportVersion())
 
 		hasK8SRequirePolicy := func() bool {
-			for _, role := range roles.RoleSet {
+			for _, role := range roles {
 				for _, policy := range role.GetSessionRequirePolicies() {
 					if ContainsSessionKind(policy.Kinds, types.KubernetesSessionKind) {
 						return true
@@ -3784,7 +3787,7 @@ func (a *ServerWithRoles) GenerateUserSingleUseCerts(ctx context.Context) (proto
 }
 
 func (a *ServerWithRoles) IsMFARequired(ctx context.Context, req *proto.IsMFARequiredRequest) (*proto.IsMFARequiredResponse, error) {
-	if !hasLocalUserRole(a.context.Checker) && !hasRemoteUserRole(a.context.Checker) {
+	if !hasLocalUserRole(a.context) && !hasRemoteUserRole(a.context) {
 		return nil, trace.AccessDenied("only a user role can call IsMFARequired, got %T", a.context.Checker)
 	}
 	return a.authServer.isMFARequired(ctx, a.context.Checker, req)

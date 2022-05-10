@@ -475,12 +475,19 @@ func (s *Server) generateInitialBotCerts(ctx context.Context, username string, p
 	roles := user.GetRoles()
 	traits := user.GetTraits()
 
-	parsedRoles, err := services.FetchRoleList(roles, s, traits)
+	roleSet, err := services.FetchRoles(roles, s, traits)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	// add implicit roles to the set and build a checker
-	checker := services.NewRoleSet(parsedRoles...)
+	clusterName, err := s.GetDomainName()
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	checker := services.NewAccessChecker(&services.AccessInfo{
+		Roles:   roleSet.RoleNames(),
+		Traits:  traits,
+		RoleSet: roleSet,
+	}, clusterName)
 
 	// renewable cert request must include a generation
 	var generation uint64

@@ -626,6 +626,9 @@ type AccessChecker interface {
 	// RoleNames returns a list of role names
 	RoleNames() []string
 
+	// Roles returns the list underlying roles this AccessChecker is based on.
+	Roles() []types.Role
+
 	// CheckAccess checks access to the specified resource.
 	CheckAccess(r AccessCheckable, mfa AccessMFAParams, matchers ...RoleMatcher) error
 
@@ -723,6 +726,23 @@ type AccessChecker interface {
 	// "assume" while searching for resources, and should be able to request with a
 	// search-based access request.
 	GetSearchAsRoles() []string
+
+	// MaxConnections returns the maximum number of concurrent ssh connections
+	// allowed.  If MaxConnections is zero then no maximum was defined and the
+	// number of concurrent connections is unconstrained.
+	MaxConnections() int64
+
+	// MaxSessions returns the maximum number of concurrent ssh sessions per
+	// connection. If MaxSessions is zero then no maximum was defined and the
+	// number of sessions is unconstrained.
+	MaxSessions() int64
+
+	// SessionPolicySets returns the list of SessionPolicySets for all roles.
+	SessionPolicySets() []*types.SessionTrackerPolicySet
+
+	GetLogins() []string
+
+	GetAllowedResourceIDs() []types.ResourceID
 }
 
 // FromSpec returns new RoleSet created from spec
@@ -845,6 +865,16 @@ func ExtractTraitsFromCert(cert *ssh.Certificate) (wrappers.Traits, error) {
 	return traits, nil
 }
 
+func ExtractAllowedResourcesFromCert(cert *ssh.Certificate) ([]types.ResourceID, error) {
+	allowedResourcesStr, ok := cert.Extensions[teleport.CertExtensionAllowedResources]
+	if !ok {
+		// if not present in the cert, there are no resource-based restrictions
+		return nil, nil
+	}
+	allowedResources, err := ResourceIDsFromString(allowedResourcesStr)
+	return allowedResources, trace.Wrap(err)
+}
+
 // NewRoleSet returns new RoleSet based on the roles
 func NewRoleSet(roles ...types.Role) RoleSet {
 	// unauthenticated Nop role should not have any privileges
@@ -945,7 +975,7 @@ func (set RoleSet) EnumerateDatabaseUsers(database types.Database, extraUsers ..
 
 		result.wildcardDenied = result.wildcardDenied || wildcardDenied
 
-		if err := NewRoleSet(role).CheckAccess(database, AccessMFAParams{Verified: true}); err == nil {
+		if err := NewRoleSet(role).checkAccess(database, AccessMFAParams{Verified: true}); err == nil {
 			result.wildcardAllowed = result.wildcardAllowed || wildcardAllowed
 		}
 
@@ -955,7 +985,7 @@ func (set RoleSet) EnumerateDatabaseUsers(database types.Database, extraUsers ..
 
 	// check each individual user against the database.
 	for _, user := range users {
-		err := set.CheckAccess(database, AccessMFAParams{Verified: true}, &DatabaseUserMatcher{User: user})
+		err := set.checkAccess(database, AccessMFAParams{Verified: true}, &DatabaseUserMatcher{User: user})
 		result.allowedDeniedMap[user] = err == nil
 	}
 
@@ -1051,6 +1081,15 @@ func (set RoleSet) RoleNames() []string {
 	return out
 }
 
+// Roles returns the list underlying roles this AccessChecker is based on.
+func (set RoleSet) Roles() []types.Role {
+	out := make([]types.Role, len(set))
+	for i := range set {
+		out[i] = set[i]
+	}
+	return out
+}
+
 // HasRole checks if the role set has the role
 func (set RoleSet) HasRole(role string) bool {
 	for _, r := range set {
@@ -1121,6 +1160,16 @@ func (set RoleSet) MaxKubernetesConnections() int64 {
 		}
 	}
 	return mcs
+}
+
+// SessionPolicySets returns the list of SessionPolicySets for all roles.
+func (set RoleSet) SessionPolicySets() []*types.SessionTrackerPolicySet {
+	var policySets []*types.SessionTrackerPolicySet
+	for _, role := range set {
+		policySet := role.GetSessionPolicySet()
+		policySets = append(policySets, &policySet)
+	}
+	return policySets
 }
 
 // AdjustClientIdleTimeout adjusts requested idle timeout
@@ -1293,6 +1342,11 @@ func (set RoleSet) CheckLoginDuration(ttl time.Duration) ([]string, error) {
 	}
 
 	return logins, nil
+}
+
+func (set RoleSet) GetLogins() []string {
+	logins, _ := set.GetLoginsForTTL(0)
+	return logins
 }
 
 // GetLoginsForTTL collects all logins that are valid for the given TTL.  The matchedTTL
@@ -1847,9 +1901,9 @@ func rbacDebugLogger() (debugEnabled bool, debugf func(format string, args ...in
 	return isDebugEnabled, log.Debugf
 }
 
-// CheckAccess checks if this role set has access to a particular resource,
+// checkAccess checks if this role set has access to a particular resource,
 // optionally matching the resource's labels.
-func (set RoleSet) CheckAccess(r AccessCheckable, mfa AccessMFAParams, matchers ...RoleMatcher) error {
+func (set RoleSet) checkAccess(r AccessCheckable, mfa AccessMFAParams, matchers ...RoleMatcher) error {
 	// Note: logging in this function only happens in debug mode. This is because
 	// adding logging to this function (which is called on every resource returned
 	// by the backend) can slow down this function by 50x for large clusters!
