@@ -3530,7 +3530,7 @@ func (a *ServerWithRoles) CreateAppSession(ctx context.Context, req types.Create
 }
 
 func (a *ServerWithRoles) CreateSnowflakeSession(ctx context.Context, req types.CreateSnowflakeSessionRequest) (types.WebSession, error) {
-	if err := a.currentUserAction(req.Username); err != nil {
+	if err := a.action(apidefaults.Namespace, types.KindDatabase, types.VerbCreate); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
