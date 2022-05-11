@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/api/breaker"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/types"
 	apisshutils "github.com/gravitational/teleport/api/utils/sshutils"
@@ -205,6 +206,8 @@ type Config struct {
 
 	// NodeWatcher is a node watcher.
 	NodeWatcher *services.NodeWatcher
+
+	CircuitBreakerConfig breaker.Config
 }
 
 // CheckAndSetDefaults checks parameters and sets default values

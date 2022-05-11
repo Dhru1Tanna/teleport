@@ -60,6 +60,7 @@ import (
 	kyaml "k8s.io/apimachinery/pkg/util/yaml"
 
 	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/api/breaker"
 	apiProto "github.com/gravitational/teleport/api/client/proto"
 	authproto "github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/client/webclient"
@@ -289,6 +290,7 @@ func newWebSuite(t *testing.T) *WebSuite {
 		DataDir:               t.TempDir(),
 		LockWatcher:           proxyLockWatcher,
 		NodeWatcher:           proxyNodeWatcher,
+		CircuitBreakerConfig:  breaker.NoopBreakerConfig(),
 	})
 	require.NoError(t, err)
 	s.proxyTunnel = revTunServer
@@ -3761,6 +3763,7 @@ func createProxy(ctx context.Context, t *testing.T, proxyID string, node *regula
 		DataDir:               t.TempDir(),
 		LockWatcher:           proxyLockWatcher,
 		NodeWatcher:           proxyNodeWatcher,
+		CircuitBreakerConfig:  breaker.NoopBreakerConfig(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, revTunServer.Close()) })
