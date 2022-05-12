@@ -4861,7 +4861,7 @@ func testBPFInteractive(t *testing.T, suite *integrationTestSuite) {
 	// Check if BPF tests can be run on this host.
 	err := canTestBPF()
 	if err != nil {
-		t.Skip(fmt.Sprintf("Tests for BPF functionality can not be run: %v.", err))
+		t.Skipf("Tests for BPF functionality can not be run: %v.", err)
 		return
 	}
 
@@ -4989,7 +4989,7 @@ func testBPFExec(t *testing.T, suite *integrationTestSuite) {
 	// Check if BPF tests can be run on this host.
 	err := canTestBPF()
 	if err != nil {
-		t.Skip(fmt.Sprintf("Tests for BPF functionality can not be run: %v.", err))
+		t.Skipf("Tests for BPF functionality can not be run: %v.", err)
 		return
 	}
 
@@ -5224,7 +5224,7 @@ func testBPFSessionDifferentiation(t *testing.T, suite *integrationTestSuite) {
 	// Check if BPF tests can be run on this host.
 	err := canTestBPF()
 	if err != nil {
-		t.Skip(fmt.Sprintf("Tests for BPF functionality can not be run: %v.", err))
+		t.Skipf("Tests for BPF functionality can not be run: %v.", err)
 		return
 	}
 
