@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/gravitational/teleport"
@@ -30,6 +31,7 @@ import (
 	apidefaults "github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
+	apiutils "github.com/gravitational/teleport/api/utils"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/services"
@@ -57,15 +59,64 @@ func (a *Server) getOIDCClient(conn types.OIDCConnector, proxyAddr string) (*oid
 	if ok && cmp.Equal(cachedClient.connector, conn) {
 		return cachedClient.client, nil
 	}
-	delete(a.oidcClients, conn.GetName())
 
-	client, err := services.GetOIDCClient(a.closeCtx, conn, proxyAddr)
+	cachedClient.cancel()
+	delete(cachedClients, proxyAddr)
+
+	client, err := a.createOIDCClient(conn, proxyAddr)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	cachedClients[proxyAddr] = &oidcClient{client: client, connector: conn}
-	return client, nil
+	cachedClients[proxyAddr] = client
+	return client.client, nil
+}
+
+func (a *Server) createOIDCClient(conn types.OIDCConnector, proxyAddr string) (*oidcClient, error) {
+	config := oidcConfig(conn, proxyAddr)
+	client, err := oidc.NewClient(config)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// SyncProviderConfig doesn't take a context for cancellation, instead it
+	// returns a channel that has to be closed to stop the sync. To ensure that
+	// the sync is eventually stopped we create a child context of the server context, which
+	// is cancelled either on deletion of the connector or shutdown of the server.
+	// This will cause syncCtx.Done() to unblock, at which point we can close the stop channel.
+	firstSync := make(chan struct{})
+	syncCtx, syncCancel := context.WithCancel(a.closeCtx)
+	go func() {
+		stop := client.SyncProviderConfig(conn.GetIssuerURL())
+		close(firstSync)
+		<-syncCtx.Done()
+		close(stop)
+	}()
+
+	select {
+	case <-firstSync:
+	case <-time.After(defaults.WebHeadersTimeout):
+		syncCancel()
+		return nil, trace.ConnectionProblem(nil,
+			"timed out syncing oidc connector %v, ensure URL %q is valid and accessible and check configuration",
+			conn.GetName(), conn.GetIssuerURL())
+	case <-a.closeCtx.Done():
+		syncCancel()
+		return nil, trace.ConnectionProblem(nil, "auth server is shutting down")
+	}
+	return &oidcClient{client: client, connector: conn, cancel: syncCancel}, nil
+}
+
+func oidcConfig(conn types.OIDCConnector, proxyAddr string) oidc.ClientConfig {
+	return oidc.ClientConfig{
+		RedirectURL: services.GetRedirectURL(conn, proxyAddr),
+		Credentials: oidc.ClientCredentials{
+			ID:     conn.GetClientID(),
+			Secret: conn.GetClientSecret(),
+		},
+		// open id notifies provider that we are using OIDC scopes
+		Scope: apiutils.Deduplicate(append([]string{"openid", "email"}, conn.GetScope()...)),
+	}
 }
 
 // UpsertOIDCConnector creates or updates an OIDC connector.
@@ -111,7 +162,6 @@ func (a *Server) DeleteOIDCConnector(ctx context.Context, connectorName string) 
 
 func (a *Server) CreateOIDCAuthRequest(req services.OIDCAuthRequest) (*services.OIDCAuthRequest, error) {
 	ctx := context.TODO()
-
 	connector, err := a.Identity.GetOIDCConnector(ctx, req.ConnectorID, true)
 	if err != nil {
 		return nil, trace.Wrap(err)

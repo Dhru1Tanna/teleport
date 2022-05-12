@@ -3696,6 +3696,7 @@ const (
 type oidcClient struct {
 	client    *oidc.Client
 	connector types.OIDCConnector
+	cancel    context.CancelFunc
 }
 
 // samlProvider is internal structure that stores SAML client and its config

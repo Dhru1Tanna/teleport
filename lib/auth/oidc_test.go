@@ -29,7 +29,6 @@ import (
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/types"
-	apiutils "github.com/gravitational/teleport/api/utils"
 	authority "github.com/gravitational/teleport/lib/auth/testauthority"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/backend/lite"
@@ -81,23 +80,15 @@ func setUpSuite(t *testing.T) *OIDCSuite {
 
 // createInsecureOIDCClient creates an insecure client for testing.
 func createInsecureOIDCClient(t *testing.T, connector types.OIDCConnector) *oidc.Client {
-	client, err := oidc.NewClient(oidc.ClientConfig{
-		RedirectURL: "",
-		Credentials: oidc.ClientCredentials{
-			ID:     connector.GetClientID(),
-			Secret: connector.GetClientSecret(),
-		},
-		// open id notifies provider that we are using OIDC scopes
-		Scope: apiutils.Deduplicate(append([]string{"openid", "email"}, connector.GetScope()...)),
-		HTTPClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
+	conf := oidcConfig(connector, "")
+	conf.HTTPClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
 			},
 		},
-	})
-
+	}
+	client, err := oidc.NewClient(conf)
 	require.NoError(t, err)
 	client.SyncProviderConfig(connector.GetIssuerURL())
 	return client

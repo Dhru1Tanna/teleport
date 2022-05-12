@@ -17,19 +17,14 @@ limitations under the License.
 package services
 
 import (
-	"context"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/coreos/go-oidc/jose"
-	"github.com/coreos/go-oidc/oidc"
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/types"
-	apiutils "github.com/gravitational/teleport/api/utils"
-	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/utils"
 )
 
@@ -96,40 +91,6 @@ func OIDCClaimsToTraits(claims jose.Claims) map[string][]string {
 	}
 
 	return traits
-}
-
-// GetOIDCClient creates a new OIDC client for the given OIDC connector and proxy addr.
-func GetOIDCClient(ctx context.Context, conn types.OIDCConnector, proxyAddr string) (*oidc.Client, error) {
-	client, err := oidc.NewClient(oidc.ClientConfig{
-		RedirectURL: GetRedirectURL(conn, proxyAddr),
-		Credentials: oidc.ClientCredentials{
-			ID:     conn.GetClientID(),
-			Secret: conn.GetClientSecret(),
-		},
-		// open id notifies provider that we are using OIDC scopes
-		Scope: apiutils.Deduplicate(append([]string{"openid", "email"}, conn.GetScope()...)),
-	})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	doneSyncing := make(chan struct{})
-	go func() {
-		defer close(doneSyncing)
-		client.SyncProviderConfig(conn.GetIssuerURL())
-	}()
-
-	select {
-	case <-doneSyncing:
-	case <-time.After(defaults.WebHeadersTimeout):
-		return nil, trace.ConnectionProblem(nil,
-			"timed out syncing oidc connector %v, ensure URL %q is valid and accessible and check configuration",
-			conn.GetName(), conn.GetIssuerURL())
-	case <-ctx.Done():
-		return nil, trace.ConnectionProblem(nil, "auth server is shutting down")
-	}
-
-	return client, nil
 }
 
 // GetRedirectURL gets a redirect URL for the given connector. If the connector

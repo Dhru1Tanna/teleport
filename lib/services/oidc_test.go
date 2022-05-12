@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package services_test
+package services
 
 import (
 	"testing"
@@ -23,7 +23,6 @@ import (
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api/types"
-	"github.com/gravitational/teleport/lib/services"
 
 	"github.com/stretchr/testify/require"
 )
@@ -48,10 +47,10 @@ func TestOIDCRoleMappingEmpty(t *testing.T) {
 	claims.Add("nickname", "foo")
 	claims.Add("full_name", "foo bar")
 
-	traits := services.OIDCClaimsToTraits(claims)
+	traits := OIDCClaimsToTraits(claims)
 	require.Len(t, traits, 4)
 
-	_, roles := services.TraitsToRoles(oidcConnector.GetTraitMappings(), traits)
+	_, roles := TraitsToRoles(oidcConnector.GetTraitMappings(), traits)
 	require.Len(t, roles, 0)
 }
 
@@ -82,10 +81,10 @@ func TestOIDCRoleMapping(t *testing.T) {
 	claims.Add("nickname", "foo")
 	claims.Add("full_name", "foo bar")
 
-	traits := services.OIDCClaimsToTraits(claims)
+	traits := OIDCClaimsToTraits(claims)
 	require.Len(t, traits, 4)
 
-	_, roles := services.TraitsToRoles(oidcConnector.GetTraitMappings(), traits)
+	_, roles := TraitsToRoles(oidcConnector.GetTraitMappings(), traits)
 	require.Len(t, roles, 1)
 	require.Equal(t, "user", roles[0])
 }
@@ -116,7 +115,7 @@ func TestOIDCUnmarshal(t *testing.T) {
       }
 	`
 
-	oc, err := services.UnmarshalOIDCConnector([]byte(input))
+	oc, err := UnmarshalOIDCConnector([]byte(input))
 	require.NoError(t, err)
 
 	require.Equal(t, "google", oc.GetName())
@@ -149,7 +148,7 @@ func TestOIDCUnmarshalOmitPrompt(t *testing.T) {
       }
 	`
 
-	oc, err := services.UnmarshalOIDCConnector([]byte(input))
+	oc, err := UnmarshalOIDCConnector([]byte(input))
 	require.NoError(t, err)
 
 	require.Equal(t, "google", oc.GetName())
@@ -181,7 +180,7 @@ func TestOIDCUnmarshalPromptDefault(t *testing.T) {
       }
 	`
 
-	oc, err := services.UnmarshalOIDCConnector([]byte(input))
+	oc, err := UnmarshalOIDCConnector([]byte(input))
 	require.NoError(t, err)
 
 	require.Equal(t, "google", oc.GetName())
@@ -217,6 +216,6 @@ func TestOIDCUnmarshalInvalid(t *testing.T) {
       }
 	`
 
-	_, err := services.UnmarshalOIDCConnector([]byte(input))
+	_, err := UnmarshalOIDCConnector([]byte(input))
 	require.Error(t, err)
 }
