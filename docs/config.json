@@ -243,10 +243,6 @@
               "slug": "/application-access/guides/connecting-apps/"
             },
             {
-              "title": "Integrating with JWT",
-              "slug": "/application-access/guides/jwt/"
-            },
-            {
               "title": "API Access",
               "slug": "/application-access/guides/api-access/"
             },
@@ -257,6 +253,20 @@
             {
               "title": "Dynamic Registration",
               "slug": "/application-access/guides/dynamic-registration/"
+            }
+          ]
+        },
+        {
+          "title": "JWT Authentication",
+          "slug": "/application-access/jwt/",
+          "entries": [
+            {
+              "title": "Introduction",
+              "slug": "/application-access/jwt/introduction/"
+            },
+            {
+              "title": "ElasticSearch",
+              "slug": "/application-access/jwt/elasticsearch/"
             }
           ]
         },
@@ -1140,6 +1150,11 @@
     {
       "source": "/docs/setup/reference/license/",
       "destination": "/docs/enterprise/license/",
+      "permanent": true
+    },
+    {
+      "source": "/application-access/guides/jwt/",
+      "destination": "/application-access/jwt/",
       "permanent": true
     }
   ]

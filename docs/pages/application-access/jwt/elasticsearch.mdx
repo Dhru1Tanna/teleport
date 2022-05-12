@@ -1,0 +1,112 @@
+---
+title: Using JWT authentication with ElasticSearch
+description: How to use JWT authentication with ElasticSearch
+---
+
+This guide will help you configure ElasticSearch [JWT authentication](https://www.elastic.co/guide/en/elasticsearch/reference/current/jwt-realm.html)
+with Teleport Application Access.
+
+<Details title="Version warning" opened={true}>
+  ElasticSearch supports JWT authentication starting from version 8.2.0 and
+  as of this writing is in beta.
+</Details>
+
+## Prerequisites
+
+- Teleport cluster version >= 9.3 with configured [Application Access](../guides/connecting-apps.mdx).
+- ElasticSearch cluster.
+
+## Step 1. Enable JWT realm in ElasticSearch
+
+Update your ElasticSearch configuration file `elasticsearch.yaml` to enable a
+JWT realm:
+
+```yaml
+xpack.security.authc.realms.jwt.jwt1:
+  order: 1
+  client_authentication.type: none
+  pkc_jwkset_path: https://proxy.example.com/.well-known/jwks.json
+  claims.principal: sub
+  claims.groups: roles
+  allowed_issuer: example-cluster
+  allowed_audiences: ["https://elasticsearch.example.com:9200"]
+```
+
+Let's take a closer look at the parameters and their values:
+
+- Set `client_authentication.type` to `none`, otherwise ElasticSearch requires
+  clients to send a shared secret value with each request.
+- Set `pkc_jwkset_path` to the JWT key set file URL of your Teleport Proxy.
+  You can also download the JSON file from the same URL and point the path
+  directly to it instead of using a URL.
+- Set `claims.principal` and `claims.groups` to `sub` and `roles` respectively.
+  As described in [Introduction](./introduction.mdx), these are the claims
+  Teleport uses to pass user and roles information in JWT tokens. Keep in mind
+  that **users and roles must exist** in ElasticSearch.
+- Set `allowed_issuer` to the name of your Teleport cluster.
+- Set `allowed_audiences` to the URL which Teleport Application Service will
+  use to connect to ElasticSearch (from the application YAML configuration).
+
+Note that when using JWT authentication, you cannot map user roles using
+standard ElasticSearch `role_mapping.yml` file. Instead, you need to set the
+role mapping using the API. See [JWT realm authorization](https://www.elastic.co/guide/en/elasticsearch/reference/current/jwt-realm.html#jwt-authorization)
+for details.
+
+## Step 2. Register ElasticSearch application in Teleport
+
+In your Teleport App Service configuration `teleport.yaml`, register an entry
+for ElasticSearch:
+
+```yaml
+app_service:
+  enabled: "yes"
+  apps:
+  - name: "elastic"
+    uri: https://elasticsearch.example.com:9200
+    rewrite:
+      headers:
+      - "Authorization: Bearer {{internal.jwt}}"
+```
+
+<Admonition type="tip">
+  You can also use [dynamic registration](../guides/dynamic-registration.mdx).
+</Admonition>
+
+ElasticSearch requires JWT token to be passed inside `Authorization` header.
+The header rewrite configuration above will replace `{{internal.jwt}}` template
+variable with Teleport-signed JWT token in each request as described in
+[Inject JWT](./introduction.mdx#inject-jwt).
+
+## Step 3. Connect to ElasticSearch API
+
+Log into your Teleport cluster with `tsh login` and make sure ElasticSearch
+application is available:
+
+```code
+$ tsh app ls
+Application Description   Public Address               Labels
+----------- ------------- ---------------------------- -------------------------------
+elastic                   elastic.teleport.example.com
+```
+
+Fetch short-lived X.509 certificate for it:
+
+```code
+$ tsh app login elastic
+```
+
+Then you can use curl command to communicate with ElasticSearch API which
+will authenticate you as your Teleport user:
+
+```code
+$ curl \
+  --cacert ~/.tsh/keys/teleport.example.com/cas/root.pem \
+  --cert ~/.tsh/keys/teleport.example.com/alice-app/example-cluster/elastic-x509.pem \
+  --key ~/.tsh/keys/teleport.example.com/alice \
+  https://elastic.teleport.example.com/_security/user | jq
+```
+
+## Next steps
+
+- Learn more about [accessing APIs](../guides/api-access.mdx) with Application Access.
+- Take a look at [Access Controls](../controls.mdx) with Application Access.
